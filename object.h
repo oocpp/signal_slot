@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <vector>
 #include <algorithm>
 #include <utility>
@@ -11,6 +11,7 @@
 /// 发送信号或接收信号的类需要继承自 Object。
 /// 在类中使用 Signal(signal_name, type1, type2, ...) 定义信号。
 /// 发生信号 emit this->signal_name(arg1, arg2)。
+/// 支持Unique连接。
 /// 
 /// 连接信号使用
 /// this->signal_name.connect(slot)
@@ -51,6 +52,14 @@
 
 
 class Object;
+
+enum class ConnecttionType {
+    Auto = 0,
+    Direct = 1,
+    //Queued = 2,
+    //BlockingQueued = 4,
+    Unique = 8,
+};
 
 namespace objectImpl
 {
@@ -385,27 +394,49 @@ namespace objectImpl
 
     inline bool addConnection(Object* obj, Connection* conn);
 
-    template<typename... Args>
-    class SignalImpl {
-        using SigArgs = List<Args...>;
-
+    class SignalImplBase
+    {
     public:
-        SignalImpl(const SignalImpl&) = delete;
-        SignalImpl& operator=(const SignalImpl&) = delete;
-        explicit SignalImpl(Object* parent) noexcept :m_parent(parent) {}
+        SignalImplBase(const SignalImplBase&) = delete;
+        SignalImplBase& operator=(const SignalImplBase&) = delete;
+        explicit SignalImplBase(Object* parent) noexcept :m_parent(parent) {}
 
-        ~SignalImpl() {
+        ~SignalImplBase() {
             disconnect();
             assert(m_nested == 0);
         }
 
-        void operator()(Args...args) const {
-            const_cast<SignalImpl*>(this)->operator()(args...);
+        bool disconnect() {
+            for (auto& conn : m_conns) {
+                if (conn) {
+                    if (!conn->recver) {
+                        delete conn;
+                    }
+                    else {
+                        conn->release();
+                    }
+                    conn = nullptr;
+                }
+            }
+
+            return !m_conns.empty();
         }
 
-        void operator()(Args...args) {
+        bool disconnect(const Object* obj) {
+            bool res = false;
+            for (auto& conn : m_conns) {
+                if (conn && conn->recver == obj) {
+                    conn->release();
+                    conn = nullptr;
+                    res = true;
+                }
+            }
+            return res;
+        }
+
+    protected:
+        void invokeSlots(void** args) {
             SenderGuard sender(m_parent);
-            void* _a[] = { const_cast<void*>(reinterpret_cast<const void*>(&args))..., 0 };
             size_t count = 0;
             ++m_nested;
             for (auto& conn : m_conns) {
@@ -415,7 +446,7 @@ namespace objectImpl
                 }
 
                 if (conn->ref == 2) {
-                    conn->slot->call(conn->recver, _a);
+                    conn->slot->call(conn->recver, args);
                 }
                 else {
                     if (conn->release()) {
@@ -438,146 +469,48 @@ namespace objectImpl
                     delete m_waitForConns;
                     m_waitForConns = nullptr;
                 }
+
+                if (m_conns.capacity() / 2 > m_conns.size()) {
+                    auto tmp = m_conns;
+                    tmp.swap(m_conns);
+                }
             }
         }
 
-        bool disconnect() {
+        bool isConnectionExist(const Object* obj, void** arg) const{
             for (auto& conn : m_conns) {
-                if (conn) {
-                    if (!conn->recver) {
-                        delete conn;
-                    }
-                    else {
-                        conn->release();
-                    }
-                    conn = nullptr;
+                if (conn && conn->recver == obj && conn->ref == 2 && conn->slot->compare(arg)) {
+                    return true;
                 }
             }
 
-            if (!m_conns.empty()) {
-                if (m_nested == 0) {
-                    m_conns.clear();
-                }
-                return true;
-            }
             return false;
         }
 
-        bool disconnect(const Object* obj) {
-            return disconnectImpl(obj);
-        }
-
-        template<typename Slot>
-        bool disconnect(const typename CallableObject<remove_rv_t<Slot>>::ObjectType* obj, const Slot& slot) {
-            void** _a = reinterpret_cast<void**>(const_cast<void*>(reinterpret_cast<const void*>(&slot)));
-            return disconnectImpl(obj, _a);
-		}
-
-		template<typename Slot>
-		bool disconnect(const typename CallableObject<remove_rv_t<Slot>>::ObjectType& obj, const Slot& slot) {
-            return disconnect(&obj, slot);
-		}
-
-		template<typename Slot>
-		std::enable_if_t<!std::is_base_of_v<Object, std::remove_pointer_t<remove_rcv_t<Slot>>>, bool> 
-            disconnect(const Slot& slot) {
-            using _CallableObject = CallableObject<remove_rv_t<Slot>>;
-			return disconnect(static_cast<typename _CallableObject::ObjectType*>(nullptr), slot);
-		}
-
-        template<typename Slot>
-        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType* recv, Slot&& slot) {
-            using _Slot = remove_rv_t<Slot>;
-            using _CallableObject = CallableObject<_Slot>;
-            static_assert(_CallableObject::isCallable, "slot is not a callable object");
-
-            if constexpr (_CallableObject::callableOjectType != CallableObjectType::FuncionObject) {
-                static_assert(SigArgs::size >= _CallableObject::ArguementTypes::size, "The slot requires more arguments than the signal provides.");
-
-                using LeftSigArgs = decltype(List_Left<SigArgs, _CallableObject::ArguementTypes::size>());
-                if constexpr (LeftSigArgs::size > 0) {
-                    static_assert(checkCompatibleArguments<LeftSigArgs, typename _CallableObject::ArguementTypes>::value,
-                        "Signal and slot arguments are not compatible.");
+        bool disconnectImpl(const Object* obj, void** arg) {
+            bool res = false;
+            for (auto& conn : m_conns) {
+                if (conn && conn->recver == obj && conn->ref == 2 && conn->slot->compare(arg)) {
+                    conn->release();
+                    conn = nullptr;
+                    res = true;
+                    break;
                 }
-                return createConnect<LeftSigArgs, Slot>(recv, std::forward<Slot>(slot));
             }
-            else {
-                using types = ComputeFunctorArgument<Slot, SigArgs>;
-                static_assert(types::value >= 0, "Signal and slot arguments are not compatible. There is no operator() overload that can be called.");
-                return createConnect<typename types::type, Slot>(recv, std::forward<Slot>(slot));
-            }
+            return res;
         }
 
-        template<typename Slot>
-        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType& recv, Slot&& slot) {
-            return connect(&recv, std::forward<Slot>(slot));
-        }
-
-        template<typename Slot>
-        bool connect(Slot&& slot) {
-            using _CallableObject = CallableObject<remove_rv_t<Slot>>;
-            static_assert(_CallableObject::callableOjectType != CallableObjectType::MemberFuncion, "member function can not use this connect.");
-            static_assert(_CallableObject::callableOjectType != CallableObjectType::Signal, "signal can not use this connect.");
-            return connect(static_cast<typename _CallableObject::ObjectType*>(nullptr), std::forward<Slot>(slot));
-        }
-
-        template<typename Obj, typename Slot>
-        std::enable_if_t<!std::is_base_of_v<Object, remove_rcv_t<std::remove_pointer_t<Obj>>>, bool>
-            connect(Obj&& recv, Slot&& slot) const {
-            static_assert(false, "The first parameter is not a subclass of Object");
-        }
-
-        template<typename Slot>
-        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType* recv, Slot&& slot) const {
-            static_assert(false, "signal cannot be constant member");
-        }
-
-        template<typename Slot>
-        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType& recv, Slot&& slot) const {
-            static_assert(false, "signal cannot be constant member");
-        }
-
-        template<typename Slot>
-        bool connect(Slot&& slot) const {
-            static_assert(false, "signal cannot be constant member");
-        }
-
-    private:
-		bool disconnectImpl(const Object* obj, void** arg = nullptr) {
-			bool res = false;
-			for (auto& conn : m_conns) {
-				if (!conn) {
-					continue;
-				}
-
-				if (conn->recver == obj) {
-					if (!arg || conn->slot->compare(arg)) {
-						conn->release();
-						conn = nullptr;
-						res = true;
-                        if (arg) {
-                            break;
-                        }
-					}
-				}
-			}
-			return res;
-		}
-
-        template<typename SigArgs, typename Slot>
-        inline bool createConnect(const Object* obj, Slot&& slot) {
-            using _Slot = remove_rv_t<Slot>;
-            auto slotObj = new SlotObject<_Slot, SigArgs>(std::forward<Slot>(slot));
+        bool createConnectImpl(const Object* obj, SlotObjectBase* slotObj, ConnecttionType type = ConnecttionType::Auto) {
             auto conn = new Connection(m_parent, obj, slotObj);
             if (obj) {
                 addConnection(const_cast<Object*>(obj), conn);
             }
 
             if (m_nested == 0) {
-				if (m_conns.size() >= m_conns.capacity()) {
-					auto iter = std::remove(m_conns.begin(), m_conns.end(), (Connection*)(nullptr));
-					m_conns.erase(iter, m_conns.end());
-				}
+                if (m_conns.size() >= m_conns.capacity()) {
+                    auto iter = std::remove(m_conns.begin(), m_conns.end(), (Connection*)(nullptr));
+                    m_conns.erase(iter, m_conns.end());
+                }
                 m_conns.push_back(conn);
             }
             else {
@@ -595,6 +528,114 @@ namespace objectImpl
         std::vector<Connection*> m_conns;
         std::vector<Connection*>* m_waitForConns = nullptr;
         Object* const m_parent;
+    };
+
+    template<typename... Args>
+    class SignalImpl: public SignalImplBase
+    {
+        using SigArgs = List<Args...>;
+
+    public:
+        using SignalImplBase::SignalImplBase;
+
+        void operator()(Args...args) const {
+            const_cast<SignalImpl*>(this)->operator()(args...);
+        }
+
+        void operator()(Args...args) {
+            void* _a[] = { const_cast<void*>(reinterpret_cast<const void*>(&args))..., 0 };
+            invokeSlots(_a);
+        }
+
+        template<typename Slot>
+        bool disconnect(const typename CallableObject<remove_rv_t<Slot>>::ObjectType* obj, const Slot& slot) {
+            void** _a = reinterpret_cast<void**>(const_cast<void*>(reinterpret_cast<const void*>(&slot)));
+            return disconnectImpl(obj, _a);
+        }
+
+        template<typename Slot>
+        bool disconnect(const typename CallableObject<remove_rv_t<Slot>>::ObjectType& obj, const Slot& slot) {
+            return disconnect(&obj, slot);
+        }
+
+        template<typename Slot>
+        std::enable_if_t<!std::is_base_of_v<Object, std::remove_pointer_t<remove_rcv_t<Slot>>>, bool>
+            disconnect(const Slot& slot) {
+            using _CallableObject = CallableObject<remove_rv_t<Slot>>;
+            return disconnect(static_cast<typename _CallableObject::ObjectType*>(nullptr), slot);
+        }
+
+        template<typename Slot>
+        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType* recv, Slot&& slot, ConnecttionType type = ConnecttionType::Auto) {
+            using _Slot = remove_rv_t<Slot>;
+            using _CallableObject = CallableObject<_Slot>;
+            static_assert(_CallableObject::isCallable, "slot is not a callable object");
+
+            if constexpr (_CallableObject::callableOjectType != CallableObjectType::FuncionObject) {
+                static_assert(SigArgs::size >= _CallableObject::ArguementTypes::size, "The slot requires more arguments than the signal provides.");
+
+                using LeftSigArgs = decltype(List_Left<SigArgs, _CallableObject::ArguementTypes::size>());
+                if constexpr (LeftSigArgs::size > 0) {
+                    static_assert(checkCompatibleArguments<LeftSigArgs, typename _CallableObject::ArguementTypes>::value,
+                        "Signal and slot arguments are not compatible.");
+                }
+                return createConnect<LeftSigArgs, Slot>(recv, std::forward<Slot>(slot), type);
+            }
+            else {
+                using types = ComputeFunctorArgument<Slot, SigArgs>;
+                static_assert(types::value >= 0, "Signal and slot arguments are not compatible. There is no operator() overload that can be called.");
+                return createConnect<typename types::type, Slot>(recv, std::forward<Slot>(slot));
+            }
+        }
+
+        template<typename Slot>
+        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType& recv, Slot&& slot, ConnecttionType type = ConnecttionType::Auto) {
+            return connect(&recv, std::forward<Slot>(slot), type);
+        }
+
+        template<typename Slot>
+        bool connect(Slot&& slot, ConnecttionType type = ConnecttionType::Auto) {
+            using _CallableObject = CallableObject<remove_rv_t<Slot>>;
+            static_assert(_CallableObject::callableOjectType != CallableObjectType::MemberFuncion, "member function can not use this connect.");
+            static_assert(_CallableObject::callableOjectType != CallableObjectType::Signal, "signal can not use this connect.");
+            return connect(static_cast<typename _CallableObject::ObjectType*>(nullptr), std::forward<Slot>(slot), type);
+        }
+
+        template<typename Obj, typename Slot>
+        std::enable_if_t<!std::is_base_of_v<Object, remove_rcv_t<std::remove_pointer_t<Obj>>>, bool>
+            connect(Obj&& recv, Slot&& slot, ConnecttionType type = ConnecttionType::Auto) const {
+            static_assert(false, "The first parameter is not a subclass of Object");
+        }
+
+        template<typename Slot>
+        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType* recv, Slot&& slot, ConnecttionType type = ConnecttionType::Auto) const {
+            static_assert(false, "signal cannot be constant member");
+        }
+
+        template<typename Slot>
+        bool connect(typename CallableObject<remove_rv_t<Slot>>::ObjectType& recv, Slot&& slot, ConnecttionType type = ConnecttionType::Auto) const {
+            static_assert(false, "signal cannot be constant member");
+        }
+
+        template<typename Slot>
+        bool connect(Slot&& slot, ConnecttionType type = ConnecttionType::Auto) const {
+            static_assert(false, "signal cannot be constant member");
+        }
+
+    private:
+        template<typename SigArgs, typename Slot>
+        inline bool createConnect(const Object* obj, Slot&& slot, ConnecttionType type = ConnecttionType::Auto) {
+            if (type == ConnecttionType::Unique) {
+                void** _a = reinterpret_cast<void**>(const_cast<void*>(reinterpret_cast<const void*>(&slot)));
+                if (isConnectionExist(obj, _a)) {
+                    return true;
+                }
+            }
+
+            using _Slot = remove_rv_t<Slot>;
+            auto slotObj = new SlotObject<_Slot, SigArgs>(std::forward<Slot>(slot));
+            return createConnectImpl(obj, slotObj, type);
+        }
     };
 
     template<>
@@ -677,9 +718,7 @@ inline Object* sender() {
 class Object {
 public:
     explicit Object(Object* parent = nullptr) : m_parent(parent) {
-        if (parent) {
-            parent->m_children.push_back(this);
-        }
+        setParent(parent);
     }
 
     Object(const Object&) = delete;
@@ -691,7 +730,35 @@ public:
             delete child;
         }
 
+        setParent(nullptr);
         disconnect();
+    }
+
+    void setParent(Object* parent) {
+        if (m_parent == parent) {
+            return;
+        }
+
+        if (m_parent) {
+            auto& children = m_parent->m_children;
+            auto iter = std::find(children.begin(), children.end(), this);
+            if (iter != children.end()) {
+                *iter = nullptr;
+            }
+            else {
+                assert(false);
+            }
+        }
+
+        m_parent = parent;
+        if (parent) {
+            auto& children = parent->m_children;
+            if (children.size() >= children.capacity()) {
+                auto iter = std::remove(children.begin(), children.end(), (Object*)(nullptr));
+                children.erase(iter, children.end());
+            }
+            children.push_back(this);
+        }
     }
 
     bool disconnect(const Object* obj) {
@@ -700,17 +767,17 @@ public:
         }
 
         bool res = false;
-		for (auto& conn : m_connections) {
+        for (auto& conn : m_connections) {
             if (conn && conn->sender == obj) {
                 conn->release();
                 conn = nullptr;
                 res = true;
             }
-		}
+        }
         return res;
-	}
+    }
 
-    bool disconnect(){
+    bool disconnect() {
         for (auto& conn : m_connections) {
             conn->release();
         }
@@ -728,6 +795,11 @@ private:
         }
 
         m_connections.push_back(conn);
+
+        if (m_connections.capacity() / 2 > m_connections.size()) {
+            auto tmp = m_connections;
+            tmp.swap(m_connections);
+        }
         return true;
     }
 private:
@@ -739,7 +811,7 @@ private:
 };
 
 namespace objectImpl {
-    bool addConnection(Object* obj, Connection* conn) {    
+    bool addConnection(Object* obj, Connection* conn) {
         return obj->addConnection(conn);
     }
 }
