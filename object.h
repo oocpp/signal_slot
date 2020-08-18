@@ -73,13 +73,13 @@ namespace objectImpl
         static constexpr size_t size = 0;
     };
 
-    template <size_t N, typename FirstType, typename... Types, typename... SlectTypes>
-    constexpr auto List_Left_Impl(List<FirstType, Types...>, List<SlectTypes...>) {
+    template <size_t N, typename FirstType, typename... Types, typename... SelectTypes>
+    constexpr auto List_Left_Impl(List<FirstType, Types...>, List<SelectTypes...>) {
         if constexpr (N == 0) {
-            return List<SlectTypes...>{};
+            return List<SelectTypes...>{};
         }
         else {
-            return List_Left_Impl<N - 1>(List<Types...>{}, List<SlectTypes..., FirstType>{});
+            return List_Left_Impl<N - 1>(List<Types...>{}, List<SelectTypes..., FirstType>{});
         }
     }
 
@@ -392,8 +392,55 @@ namespace objectImpl
         Object* old_sender = nullptr;
     };
 
-    inline bool addConnection(Object* obj, Connection* conn);
+    struct Utils
+    {
+        inline static bool addConnection(Object* obj, Connection* conn);
 
+        static void addChild(std::vector<Object*>& chidren, Object* chid) {
+            if (!chidren.empty() && chidren.size() == chidren.capacity()) {
+                auto iter = std::remove(chidren.begin(), chidren.end(), nullptr);
+                chidren.erase(iter, chidren.end());
+            }
+
+            chidren.push_back(chid);
+
+            if (chidren.capacity() / 2 > chidren.size()) {
+                auto tmp = chidren;
+                tmp.swap(chidren);
+            }
+        }
+
+        static void addConnection(std::vector<Connection*>& conns, Connection* conn) {
+            if (!conns.empty() && conns.size() == conns.capacity()) {
+                int count = 0;
+                for (auto& item : conns) {
+                    if (!item) {
+                        ++count;
+                        continue;
+                    }
+
+                    if (item && item->ref == 1) {
+                        item->release();
+                        item = nullptr;
+                        ++count;
+                    }
+                }
+
+                if (count > conns.size() * 0.2) {
+                    auto iter = std::remove(conns.begin(), conns.end(), nullptr);
+                    conns.erase(iter, conns.end());
+                }
+            }
+
+            conns.push_back(conn);
+
+            if (conns.capacity() / 2 > conns.size()) {
+                auto tmp = conns;
+                tmp.swap(conns);
+            }
+        }
+    };
+    
     class SignalImplBase
     {
     public:
@@ -451,6 +498,7 @@ namespace objectImpl
                 else {
                     if (conn->release()) {
                         conn = nullptr;
+                        ++count;
                     }
                 }
             }
@@ -468,11 +516,6 @@ namespace objectImpl
                     }
                     delete m_waitForConns;
                     m_waitForConns = nullptr;
-                }
-
-                if (m_conns.capacity() / 2 > m_conns.size()) {
-                    auto tmp = m_conns;
-                    tmp.swap(m_conns);
                 }
             }
         }
@@ -503,15 +546,11 @@ namespace objectImpl
         bool createConnectImpl(const Object* obj, SlotObjectBase* slotObj, ConnecttionType type = ConnecttionType::Auto) {
             auto conn = new Connection(m_parent, obj, slotObj);
             if (obj) {
-                addConnection(const_cast<Object*>(obj), conn);
+                Utils::addConnection(const_cast<Object*>(obj), conn);
             }
 
             if (m_nested == 0) {
-                if (m_conns.size() >= m_conns.capacity()) {
-                    auto iter = std::remove(m_conns.begin(), m_conns.end(), (Connection*)(nullptr));
-                    m_conns.erase(iter, m_conns.end());
-                }
-                m_conns.push_back(conn);
+                Utils::addConnection(m_conns, conn);
             }
             else {
                 if (!m_waitForConns) {
@@ -717,7 +756,7 @@ inline Object* sender() {
 
 class Object {
 public:
-    explicit Object(Object* parent = nullptr) : m_parent(parent) {
+    explicit Object(Object* parent = nullptr){
         setParent(parent);
     }
 
@@ -727,9 +766,11 @@ public:
     virtual ~Object() {
         emit destory(this);
         for (auto child : m_children) {
-            delete child;
+            if (child) {
+                delete child;
+            }
         }
-
+        m_children.clear();
         setParent(nullptr);
         disconnect();
     }
@@ -752,12 +793,7 @@ public:
 
         m_parent = parent;
         if (parent) {
-            auto& children = parent->m_children;
-            if (children.size() >= children.capacity()) {
-                auto iter = std::remove(children.begin(), children.end(), (Object*)(nullptr));
-                children.erase(iter, children.end());
-            }
-            children.push_back(this);
+            objectImpl::Utils::addChild(parent->m_children, this);
         }
     }
 
@@ -788,22 +824,7 @@ public:
 
     Signal(destory, Object*)
 private:
-    bool addConnection(objectImpl::Connection* conn) {
-        if (m_connections.size() >= m_connections.capacity()) {
-            auto iter = std::remove(m_connections.begin(), m_connections.end(), (objectImpl::Connection*)(nullptr));
-            m_connections.erase(iter, m_connections.end());
-        }
-
-        m_connections.push_back(conn);
-
-        if (m_connections.capacity() / 2 > m_connections.size()) {
-            auto tmp = m_connections;
-            tmp.swap(m_connections);
-        }
-        return true;
-    }
-private:
-    friend bool objectImpl::addConnection(Object* obj, objectImpl::Connection* conn);
+    friend bool objectImpl::Utils::addConnection(Object* obj, objectImpl::Connection* conn);
 
     Object* m_parent = nullptr;
     std::vector<objectImpl::Connection*> m_connections;
@@ -811,8 +832,9 @@ private:
 };
 
 namespace objectImpl {
-    bool addConnection(Object* obj, Connection* conn) {
-        return obj->addConnection(conn);
+    bool Utils::addConnection(Object* obj, Connection* conn) {
+        objectImpl::Utils::addConnection(obj->m_connections, conn);
+        return true;
     }
 }
 
