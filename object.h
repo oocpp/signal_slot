@@ -113,15 +113,12 @@ namespace objectImpl
         :public std::true_type {
     };
 
-    template <typename List1, typename List2>
-    struct checkCompatibleArguments :public std::false_type {
-    };
-
     template <typename... Args1, typename... Args2>
-    struct checkCompatibleArguments<List<Args1...>, List<Args2...>>
+    constexpr bool checkCompatibleArguments(List<Args1...>, List<Args2...>)
     {
-        static constexpr bool value = (... && std::is_convertible_v<Args1, Args2>);
-    };
+        constexpr bool value = (... && std::is_convertible_v<Args1, Args2>);
+        return value;
+    }
 
     template <typename Func, typename Args, typename = void>
     struct canInvokable :public std::false_type {
@@ -440,7 +437,7 @@ namespace objectImpl
             }
         }
     };
-    
+
     class SignalImplBase
     {
     public:
@@ -520,7 +517,7 @@ namespace objectImpl
             }
         }
 
-        bool isConnectionExist(const Object* obj, void** arg) const{
+        bool isConnectionExist(const Object* obj, void** arg) const {
             for (auto& conn : m_conns) {
                 if (conn && conn->recver == obj && conn->ref == 2 && conn->slot->compare(arg)) {
                     return true;
@@ -570,7 +567,7 @@ namespace objectImpl
     };
 
     template<typename... Args>
-    class SignalImpl: public SignalImplBase
+    class SignalImpl : public SignalImplBase
     {
         using SigArgs = List<Args...>;
 
@@ -615,7 +612,7 @@ namespace objectImpl
 
                 using LeftSigArgs = decltype(List_Left<SigArgs, _CallableObject::ArguementTypes::size>());
                 if constexpr (LeftSigArgs::size > 0) {
-                    static_assert(checkCompatibleArguments<LeftSigArgs, typename _CallableObject::ArguementTypes>::value,
+                    static_assert(checkCompatibleArguments(LeftSigArgs{}, typename _CallableObject::ArguementTypes{}),
                         "Signal and slot arguments are not compatible.");
                 }
                 return createConnect<LeftSigArgs, Slot>(recv, std::forward<Slot>(slot), type);
@@ -756,7 +753,7 @@ inline Object* sender() {
 
 class Object {
 public:
-    explicit Object(Object* parent = nullptr){
+    explicit Object(Object* parent = nullptr) {
         setParent(parent);
     }
 

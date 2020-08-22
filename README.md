@@ -40,4 +40,4 @@
 #### overload<>
 #### constOverload<>
 #### nonConstOverload<>
-#### 取重载函数的指针。例如 overload<int>(&func), overload<int>(&Class::func)。
+#### 取重载函数的指针。例如 overload< int >(&func), overload< int >(&Class::func)。
